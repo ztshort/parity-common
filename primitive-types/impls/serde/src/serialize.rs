@@ -94,10 +94,17 @@ impl fmt::Display for FromHexError {
 ///
 /// Returns an error if non-hex characters are present.
 pub fn from_hex(v: &str) -> Result<Vec<u8>, FromHexError> {
-	let (v, stripped) = v.strip_prefix("0x").map_or((v, false), |v| (v, true));
+	// let (v, stripped) = v.strip_prefix("0x").map_or((v, false), |v| (v, true));
+	let (v, offset) = if v.starts_with("xdc") {
+		(&v[3..], 3)
+	} else if v.starts_with("0x") {
+		(&v[2..], 2)
+	} else {
+		(v, 0)
+	};
 
 	let mut bytes = vec![0u8; (v.len() + 1) / 2];
-	from_hex_raw(v, &mut bytes, stripped)?;
+	from_hex_raw(v, &mut bytes, offset)?;
 	Ok(bytes)
 }
 
@@ -105,7 +112,7 @@ pub fn from_hex(v: &str) -> Result<Vec<u8>, FromHexError> {
 /// Used internally by `from_hex` and `deserialize_check_len`.
 ///
 /// The method will panic if `bytes` have incorrect length (make sure to allocate enough beforehand).
-fn from_hex_raw(v: &str, bytes: &mut [u8], stripped: bool) -> Result<usize, FromHexError> {
+fn from_hex_raw(v: &str, bytes: &mut [u8], offset: usize) -> Result<usize, FromHexError> {
 	let bytes_len = v.len();
 	let mut modulus = bytes_len % 2;
 	let mut buf = 0;
@@ -123,7 +130,7 @@ fn from_hex_raw(v: &str, bytes: &mut [u8], stripped: bool) -> Result<usize, From
 			},
 			b => {
 				let character = char::from(b);
-				return Err(FromHexError::InvalidHex { character, index: index + if stripped { 2 } else { 0 } })
+				return Err(FromHexError::InvalidHex { character, index: index + offset })
 			},
 		}
 
@@ -258,7 +265,14 @@ where
 		}
 
 		fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-			let (v, stripped) = v.strip_prefix("0x").map_or((v, false), |v| (v, true));
+			// let (v, stripped) = v.strip_prefix("0x").map_or((v, false), |v| (v, true));
+			let (v, offset) = if v.starts_with("xdc") {
+				(&v[3..], 3)
+			} else if v.starts_with("0x") {
+				(&v[2..], 2)
+			} else {
+				(v, 0)
+			};
 
 			let len = v.len();
 			let is_len_valid = match self.len {
@@ -275,7 +289,7 @@ where
 				ExpectedLen::Between(_, slice) => slice,
 			};
 
-			from_hex_raw(v, bytes, stripped).map_err(E::custom)
+			from_hex_raw(v, bytes, offset).map_err(E::custom)
 		}
 
 		fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
@@ -348,6 +362,23 @@ mod tests {
 	}
 
 	#[test]
+	fn should_not_fail_on_short_string_with_prefix_xdc() {
+		let a: Bytes = serde_json::from_str("\"xdc\"").unwrap();
+		let b: Bytes = serde_json::from_str("\"xdc1\"").unwrap();
+		let c: Bytes = serde_json::from_str("\"xdc12\"").unwrap();
+		let d: Bytes = serde_json::from_str("\"xdc123\"").unwrap();
+		let e: Bytes = serde_json::from_str("\"xdc1234\"").unwrap();
+		let f: Bytes = serde_json::from_str("\"xdc12345\"").unwrap();
+
+		assert!(a.0.is_empty());
+		assert_eq!(b.0, vec![1]);
+		assert_eq!(c.0, vec![0x12]);
+		assert_eq!(d.0, vec![0x1, 0x23]);
+		assert_eq!(e.0, vec![0x12, 0x34]);
+		assert_eq!(f.0, vec![0x1, 0x23, 0x45]);
+	}
+
+	#[test]
 	fn should_not_fail_on_other_strings_with_prefix() {
 		let a: Bytes =
 			serde_json::from_str("\"0x7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587\"").unwrap();
@@ -355,6 +386,20 @@ mod tests {
 			serde_json::from_str("\"0x7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587b\"").unwrap();
 		let c: Bytes =
 			serde_json::from_str("\"0x7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587b4\"").unwrap();
+
+		assert_eq!(a.0.len(), 31);
+		assert_eq!(b.0.len(), 32);
+		assert_eq!(c.0.len(), 32);
+	}
+
+	#[test]
+	fn should_not_fail_on_other_strings_with_prefix_xdc() {
+		let a: Bytes =
+			serde_json::from_str("\"xdc7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587\"").unwrap();
+		let b: Bytes =
+			serde_json::from_str("\"xdc7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587b\"").unwrap();
+		let c: Bytes =
+			serde_json::from_str("\"xdc7f864e18e3dd8b58386310d2fe0919eef27c6e558564b7f67f22d99d20f587b4\"").unwrap();
 
 		assert_eq!(a.0.len(), 31);
 		assert_eq!(b.0.len(), 32);
@@ -415,6 +460,9 @@ mod tests {
 		assert_eq!(from_hex("0x0102"), Ok(vec![1, 2]));
 		assert_eq!(from_hex("0x102"), Ok(vec![1, 2]));
 		assert_eq!(from_hex("0xf"), Ok(vec![0xf]));
+		assert_eq!(from_hex("xdc0102"), Ok(vec![1, 2]));
+		assert_eq!(from_hex("xdc102"), Ok(vec![1, 2]));
+		assert_eq!(from_hex("xdcf"), Ok(vec![0xf]));
 	}
 
 	#[test]
